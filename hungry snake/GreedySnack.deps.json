@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "GreedySnack/1.0.0": {
+        "runtime": {
+          "GreedySnack.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "GreedySnack/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
