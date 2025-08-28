@@ -1,4 +1,378 @@
-    symbol x("x"), y("y"), u("u");
+
+#include <iostream>
+#include "queue"
+#include "ginac/ginac.h"
+using namespace std;
+using namespace GiNaC;
+
+
+enum Pos
+{
+    lt,
+    rt,
+    lb,
+    rb
+};
+struct Point2D_n {
+    numeric x;
+    numeric y;
+    Point2D_n(numeric xx, numeric  yy) {
+        x = xx;
+        y = yy;
+    }
+};
+
+struct RectBlock {
+    numeric x_l, x_r;
+    numeric y_b, y_t;
+
+    RectBlock(numeric xl = 0, numeric xr = 0, numeric yb = 0, numeric yt = 0)
+        : x_l(xl), x_r(xr), y_b(yb), y_t(yt) {
+    }
+
+    bool isPoint(numeric eps) const {
+        numeric x_width = x_r - x_l;
+        numeric y_width = y_t - y_b;
+        return (x_width < eps) && (y_width < eps);
+    }
+
+    numeric width() const {
+        numeric x_width = x_r - x_l;
+        numeric y_width = y_t - y_b;
+        return std::max(x_width, y_width);
+    }
+    Point2D_n center() const {
+        return Point2D_n((x_l + x_r) / 2.0, (y_b + y_t) / 2.0);
+    }
+
+    // 分割矩形块
+    std::pair<RectBlock, RectBlock> split() const {
+        if ((x_r - x_l) > (y_t - y_b)) {
+            numeric mid_x = (x_l + x_r) / 2.0;
+            return std::make_pair(
+                RectBlock(x_l, mid_x, y_b, y_t),
+                RectBlock(mid_x, x_r, y_b, y_t)
+            );
+        }
+        else {
+            numeric mid_y = (y_b + y_t) / 2.0;
+            return std::make_pair(
+                RectBlock(x_l, x_r, y_b, mid_y),
+                RectBlock(x_l, x_r, mid_y, y_t)
+            );
+        }
+    }
+};
+
+
+ex resultant_inner(ex f, ex h, symbol x,symbol y,symbol u,RectBlock rect,Pos pos) {
+    // 文档中结式定义：两个多项式的结式是消去变量后得到的多项式，
+    // 其值为零当且仅当两多项式有公共根（）。
+    // 此处利用GiNaC的结式计算功能，对应文档中Sylvester矩阵行列式方法（）。
+    numeric     a, b;
+
+    switch (pos)
+    {
+    case lt:      
+         a = rect.x_l;
+         b = rect.y_t;
+        break;
+    case rt:
+        a = rect.x_r;
+        b = rect.y_t;
+        break;
+    case lb:
+        a = rect.x_l;
+        b = rect.y_b;
+        break;
+    case rb:
+        a = rect.x_r;
+        b = rect.y_b;
+        break;
+    default:
+        break;
+    }
+
+    h = u + (x - a) * (y - b);
+    ex res = resultant(f, h, x);  // 直接调用结式计算函数，符合文档中Res(f, g; x)的符号表示
+
+    // 文档中结式为多项式（），因此展开并化简结果
+    return res.expand().collect(y);
+}
+ex resultant_outside(ex f1, ex f2, symbol y) {
+    ex res = resultant(f1, f2, y);
+    return res;
+}
+ex compute_R(ex f1, ex f2, symbol x, symbol y, symbol u, RectBlock rect, Pos pos) {
+    // 1. 构造h(x,y) = u + (x - a)(y - b)，其中a,b由矩形块位置确定
+    ex h = 0;  // 临时初始化，实际在resultant_inner中构造
+
+    // 2. 计算内部结式：Res(f1, h; x) 和 Res(f2, h; x)
+    ex res1 = resultant_inner(f1, h, x, y, u, rect, pos);
+    ex res2 = resultant_inner(f2, h, x, y, u, rect, pos);
+
+    // 3. 计算外部结式：Res(res1, res2; y)
+    ex res_outer = resultant_outside(res1, res2, y);
+    cout << "外部结式："<<res_outer << endl;
+    // 4. 确定f1和f2关于x的次数m1, m2
+    int m1 = f1.degree(x);
+    int m2 = f2.degree(x);
+
+    // 5. 计算R(u,a,b) = [外部结式] / u^(m1*m2)
+    ex denominator = pow(u, m1 * m2);
+    ex R = res_outer / denominator;
+    cout << "R：" << R.expand().collect(u) << endl;
+    // 6. 展开并化简结果（符合文档中结式为多项式的性质）
+    return R.expand().collect(u);
+}
+
+
+
+// 函数功能：判断多项式 f 是否为非平方自由（返回 true 表示非平方自由）
+bool is_non_square_free(const ex& f, const symbol& x) {
+    // 特殊情况：常数多项式是平方自由的（非非平方自由）
+    if (is_a<numeric>(f)) {
+        return false;
+    }
+
+    // 步骤1：计算 f 对 x 的导数 f'
+    ex df = diff(f, x);
+
+    // 步骤2：计算 f 与 f' 的 GCD
+    ex g = gcd(f, df);
+
+    // 步骤3：判断 GCD 是否为非常数（若为非常数，则 f 有重根，即非平方自由）
+    // 注：GiNaC 中，常数的 is_polynomial(x) 返回 false（不含变量 x）
+    return !is_a<numeric>(g); // 若 g 不是常数，则返回 true（非平方自由）
+}
+// 生成多项式关于变量u的Sturm序列
+vector<ex> generate_sturm_sequence(const ex& R, const symbol& u) {
+    vector<ex> sturm_seq;
+    ex prev = R;
+    ex curr = diff(R, u);  // 一阶导数
+
+    // 添加初始项（非零判定）
+    if (!prev.is_zero()) sturm_seq.push_back(prev);
+    if (!curr.is_zero()) sturm_seq.push_back(curr);
+
+    // 迭代生成后续项（基于带余除法）
+    while (!curr.is_zero()) {
+        ex next = -rem(prev, curr, u);  // 负余数
+        cout << "负余数:" << next << endl;
+        if (next.is_zero()) break;
+        sturm_seq.push_back(next);
+        prev = curr;
+        curr = next;
+    }
+    return sturm_seq;
+}
+
+// 计算Sturm序列在u=0处的符号不变数（跳过零值）
+int compute_permanencies(const vector<ex>& sturm_seq, const symbol& u) {
+    vector<int> signs;
+
+    // 提取每个多项式在u=0处的符号
+    for (const ex& poly : sturm_seq) {
+        ex val_at_zero = poly.subs(u == 0).evalf();  // 代入u=0
+        if (abs(val_at_zero) ==0) continue;      // 跳过零值
+
+        int sig = (val_at_zero > 0) ? 1 : -1;
+        signs.push_back(sig);
+    }
+
+    // 统计相邻符号不相同的次数（变数）
+    int permanencies = 0;
+    for (size_t i = 0; i < signs.size() - 1; ++i) {
+        if (signs[i] != signs[i + 1]) {
+            permanencies++;
+        }
+    }
+    return permanencies;
+}
+// 计算矩形区域内的曲线交点数量（兼容RectBlock和Pos）
+int count_nonfree_intersections(const ex& f1, const ex& f2,
+    const symbol& x, const symbol& y,
+    const RectBlock& rect, Pos pos);
+
+int count_curve_intersections(const ex& f1, const ex& f2,
+    const symbol& x, const symbol& y,
+    const RectBlock& rect) {
+    symbol u("u");  // 辅助变量
+
+    // 定义矩形的四个角点位置
+    Pos corners[4] = { lt, rt, lb, rb };
+    int N[4];  // 存储四个角点的符号不变数
+
+    // 计算每个角点的符号不变数N
+    for (int i = 0; i < 4; ++i) {
+        // 1. 计算当前角点对应的R(u)多项式
+        ex R = compute_R(f1, f2, x, y, u, rect, corners[i]);
+        if (is_non_square_free(R, u)) {
+            cout << "非平方自由" << endl;
+
+            return count_nonfree_intersections(f1, f2, x, y, rect, corners[i]);
+        }
+        else {
+            // 2. 生成R(u)关于u的Sturm序列
+            vector<ex> sturm_seq = generate_sturm_sequence(R, u);
+
+            // 3. 计算符号变数
+            N[i] = compute_permanencies(sturm_seq, u);
+            cout << "计算符号变数" << i << ":" << N[i] << endl;
+        }
+
+    }
+
+    // 对应论文公式(2.12)：N(lt) - N(lb) - N(rt) + N(rb) 再除以2
+    return (N[0] - N[2] - N[1] + N[3]) / 2;
+}
+
+int count_nonfree_intersections(const ex& f1, const ex& f2,
+    const symbol& x, const symbol& y,
+    const RectBlock& rect, Pos pos) {
+
+    // 1. 对整个矩形进行全方向扩展（δ = 1e-16）
+    const numeric delta(1, 1e16);
+    RectBlock expanded_rect(
+        rect.x_l - delta,  // 左边界扩展
+        rect.x_r + delta,  // 右边界扩展
+        rect.y_b - delta,  // 下边界扩展
+        rect.y_t + delta   // 上边界扩展
+    );
+
+    cout << "处理非平方自由: 扩展矩形 ["
+        << expanded_rect.x_l << ", " << expanded_rect.x_r << "] x ["
+        << expanded_rect.y_b << ", " << expanded_rect.y_t << "]\n";
+
+    // 2. 在扩展后的矩形上重新计算交点数量
+    return count_curve_intersections(f1, f2, x, y, expanded_rect);
+}
+// 采样函数：在小于误差阈值的矩形块内生成N个近似交点（基于文档Algorithm 3逻辑）
+queue<Point2D_n> Sample(int N, const RectBlock& block) {
+    queue<Point2D_n> samples;
+    if (N <= 0) return samples;  // 无交点时返回空队列
+
+    // 获取当前块的边界（numeric类型，适配RectBlock成员）
+    numeric x_l = block.x_l;
+    numeric x_r = block.x_r;
+    numeric y_b = block.y_b;
+    numeric y_t = block.y_t;
+
+    // 若N=1，直接返回块的中心点（文档Example 4.2中采样策略）
+    if (N == 1) {
+        samples.push(block.center());  // 直接使用RectBlock的center()方法，返回Point2D_n
+        return samples;
+    }
+
+    // 若N>1，沿块的长边均匀分布采样点（与split()逻辑一致，优先长边）
+    numeric x_len = x_r - x_l;  // x方向长度（numeric类型）
+    numeric y_len = y_t - y_b;  // y方向长度（numeric类型）
+
+    if (x_len >= y_len) {
+        // 沿x方向均匀分布，y取块的中点
+        numeric step = x_len / (N + 1);  // 间隔步长（避免采样点落在边界上）
+        numeric y_mid = (y_b + y_t) / 2;  // y方向中点（numeric类型）
+        for (int i = 1; i <= N; ++i) {
+            numeric x = x_l + step * i;  // 计算x坐标（numeric类型）
+            samples.push(Point2D_n(x, y_mid));  // 构造Point2D_n加入队列
+        }
+    }
+    else {
+        // 沿y方向均匀分布，x取块的中点
+        numeric step = y_len / (N + 1);  // 间隔步长
+        numeric x_mid = (x_l + x_r) / 2;  // x方向中点（numeric类型）
+        for (int i = 1; i <= N; ++i) {
+            numeric y = y_b + step * i;  // 计算y坐标（numeric类型）
+            samples.push(Point2D_n(x_mid, y));  // 构造Point2D_n加入队列
+        }
+    }
+
+    return samples;
+}
+//总函数
+queue<Point2D_n> SturmSeqVerification(ex f1,ex f2,symbol& x,symbol& y,RectBlock rect,numeric eps) {
+    queue<Point2D_n> illI ;
+    queue<RectBlock> B;
+    B.push(rect);
+    while (!B.empty()) {
+        RectBlock current = B.front();
+        B.pop();
+        int N = count_curve_intersections(f1, f2, x, y, current);
+        if (N > 0) {
+            if (current.isPoint(eps)) {
+                queue<Point2D_n> res= Sample(N, current);
+                while (!res.empty()) {
+                    illI.push(res.front());  // 将采样点逐个加入结果队列
+                    res.pop();
+                }
+            }
+            else {
+                pair<RectBlock, RectBlock> Splited = current.split();
+                B.push(Splited.first);
+                B.push(Splited.second);
+            }
+        }
+    }
+    return illI;
+}
+
+
+ex d_to_rational(double d)
+{
+    return numeric(round(d * 100000000), 100000000);
+}
+// 单独实现：全局多项式f → 块局部BB化多项式（仅含u/v）
+// 输入：f（XY隐式多项式）、block（边界为GiNaC::numeric的块）
+// 输出：BB化后的u/v多项式
+ex computeBBForm(ex f, const RectBlock& block) {
+    // 1. 提取块边界（GiNaC::numeric → 直接转为ex，GiNaC支持隐式转换）
+    ex x_l = block.x_l;  // numeric → ex（合法，GiNaC自动处理）
+    ex x_r = block.x_r;
+    ex y_b = block.y_b;
+    ex y_t = block.y_t;
+
+    // 防御性判断：避免块宽度/高度为0（防除法错误，论文未提但工程必要）
+    ex dx = x_r - x_l;  // ex类型的差值（numeric相减后仍为numeric，再转ex）
+    ex dy = y_t - y_b;
+    if (is_zero(dx) || is_zero(dy)) {  // is_zero支持ex类型的零判断
+        cerr << "[WARN] Block has zero width/height! Block: "
+            << "x[" << ex_to<numeric>(x_l) << "," << ex_to<numeric>(x_r) << "], "
+            << "y[" << ex_to<numeric>(y_b) << "," << ex_to<numeric>(y_t) << "]" << endl;
+        return f;  // 返回原多项式，避免崩溃
+    }
+
+    // 2. 论文3.1节：定义局部单位变量u/v（仅函数内有效，无符号冲突）
+    symbol u("u");  // u ∈ [0,1]（对应x轴映射）
+    symbol v("v");  // v ∈ [0,1]（对应y轴映射）
+
+    // 3. 论文核心：全局(x,y) → 局部(u,v)的替换式（numeric已转ex，可直接运算）
+    ex x_sub = x_l + u * dx;  // x = x_l（numeric→ex） + u * (x_r-x_l)（ex）
+    ex y_sub = y_b + v * dy;  // y = y_b（numeric→ex） + v * (y_t-y_b)（ex）
+
+    // 4. 执行替换：将f中的x/y符号替换为u/v的函数（与你多项式中的符号严格一致）
+    ex f_bb = f.subs(symbol("x") == x_sub);  // 替换x（确保f中的x是symbol("x")）
+    f_bb = f_bb.subs(symbol("y") == y_sub);  // 替换y（同理）
+
+    // 5. 论文要求：展开为u^i v^j多项式（确保BB形式可提取系数）
+    f_bb = f_bb.expand();  // 0：展开所有幂；true：递归展开（无嵌套项）
+
+    
+    return f_bb;  // 输出：仅含u/v的BB化多项式（Bernstein基展开形式）
+}
+
+// 处理近奇异情况的扩展函数（如Example 4.2）
+
+
+
+
+
+
+
+
+
+
+
+symbol x("x"), y("y"), u("u");
     //总容器 
     vector<Point2D_n> I;
     vector<RectBlock> Xill;
